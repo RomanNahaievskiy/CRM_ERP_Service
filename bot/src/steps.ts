@@ -1,0 +1,16 @@
+export const STEPS = {
+  START: "START",
+  SERVICE: "SERVICE",
+  VEHICLE_DATA: "VEHICLE_DATA",
+  VEHICLE_GROUP: "VEHICLE_GROUP",
+  VEHICLE_TYPE: "VEHICLE_TYPE",
+  OPTIONS: "OPTIONS",
+  DATE: "DATE",
+  TIME: "TIME",
+  PHONE_CHOICE: "PHONE_CHOICE",
+  PHONE: "PHONE",
+  CONFIRM: "CONFIRM",
+  DONE: "DONE",
+} as const;
+
+export type Step = (typeof STEPS)[keyof typeof STEPS];

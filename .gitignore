@@ -1,0 +1,15 @@
+.env
+*.env
+
+node_modules/
+dist/
+build/
+.vite/
+
+.venv/
+.deps/
+__pycache__/
+*.pyc
+db.sqlite3
+backend/backups/
+*.log
