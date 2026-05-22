@@ -20,6 +20,7 @@ import {
   Button,
   Card,
   DatePicker,
+  Form,
   Grid,
   Select,
   Space,
@@ -35,6 +36,7 @@ import type {
   BookingListOption,
   OperationsSchedule,
   ServicePost,
+  Catalog,
 } from "../api/types";
 import AppModal from "../components/AppModal";
 
@@ -80,6 +82,14 @@ type SelectedSlot = {
   day: Dayjs;
   post?: ServicePost;
   time: string;
+};
+
+type CreateBookingFormValues = {
+  serviceId?: string;
+  vehicleTypeId?: string;
+  phone?: string;
+  vehicleNumber?: string;
+  optionIds?: string[];
 };
 
 type HoverSlot = SelectedSlot & {
@@ -670,14 +680,21 @@ function getRoutePaths(
 }
 
 function SchedulePage() {
+  // External hooks and library state.
   const screens = Grid.useBreakpoint();
   const isMobile = !screens.md;
+  const [createBookingForm] = Form.useForm<CreateBookingFormValues>();
+
+  // Backend data and primary page state.
   const [startDate, setStartDate] = useState(dayjs().startOf("day"));
   const [operationsSchedule, setOperationsSchedule] =
     useState<OperationsSchedule>(() => getDefaultOperationsSchedule(dayjs()));
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [servicePosts, setServicePosts] = useState<ServicePost[]>([]);
   const [selectedPostIds, setSelectedPostIds] = useState<string[]>([]);
   const [bookings, setBookings] = useState<ScheduleBooking[]>([]);
+
+  // Modal, hover, loading, and error UI state.
   const [selectedSlot, setSelectedSlot] = useState<SelectedSlot | null>(null);
   const [hoverSlot, setHoverSlot] = useState<HoverSlot | null>(null);
   const [hoveredBookingExternalId, setHoveredBookingExternalId] = useState<
@@ -685,10 +702,77 @@ function SchedulePage() {
   >(null);
   const [selectedBooking, setSelectedBooking] =
     useState<ScheduleBooking | null>(null);
+  const [multipleSelected, setMultipleSelected] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Refs to DOM nodes used for pointer-to-grid calculations.
   const gridBodyRef = useRef<HTMLDivElement | null>(null);
 
+  // Watched create-booking form values.
+  const selectedServiceId = Form.useWatch("serviceId", createBookingForm);
+  const selectedVehicleTypeId = Form.useWatch(
+    "vehicleTypeId",
+    createBookingForm,
+  );
+
+  // Derived create-booking form data.
+  const serviceSelectOptions = useMemo(
+    () =>
+      catalog?.services.map((service) => ({
+        value: service.id,
+        label: service.title,
+      })) ?? [],
+    [catalog],
+  );
+
+  const vehicleTypeSelectOptions = useMemo(() => {
+    if (!catalog || !selectedServiceId) {
+      return [];
+    }
+
+    const vehicleTypeIds = catalog.offerings
+      .filter((offering) => offering.serviceId === selectedServiceId)
+      .map((offering) => offering.vehicleTypeId);
+
+    return catalog.vehicleTypes
+      .filter((vehicleType) => vehicleTypeIds.includes(vehicleType.id))
+      .map((vehicleType) => ({
+        value: vehicleType.id,
+        label: vehicleType.title,
+      }));
+  }, [catalog, selectedServiceId]);
+
+  const selectedOffering = useMemo(() => {
+    if (!catalog || !selectedServiceId || !selectedVehicleTypeId) {
+      return undefined;
+    }
+
+    return catalog.offerings.find(
+      (offering) =>
+        offering.serviceId === selectedServiceId &&
+        offering.vehicleTypeId === selectedVehicleTypeId,
+    );
+  }, [catalog, selectedServiceId, selectedVehicleTypeId]);
+
+  const serviceOptionSelectOptions = useMemo(() => {
+    if (!catalog || !selectedOffering) {
+      return [];
+    }
+
+    const optionIds = catalog.offeringOptions
+      .filter((link) => link.offeringId === selectedOffering.id)
+      .map((link) => link.optionId);
+
+    return catalog.options
+      .filter((option) => optionIds.includes(option.id))
+      .map((option) => ({
+        value: option.id,
+        label: option.title,
+      }));
+  }, [catalog, selectedOffering]);
+
+  // Derived schedule data calculated from backend state and current filters.
   const scheduleDays = useMemo(() => getScheduleDays(startDate), [startDate]);
   const visibleRange = useMemo(
     () => getVisibleScheduleRange(operationsSchedule),
@@ -768,6 +852,8 @@ function SchedulePage() {
   const totalGridWidth =
     GRID_TIME_COLUMN_WIDTH + columns.length * GRID_POST_COLUMN_WIDTH;
   const gridBodyHeight = segmentTimes.length * GRID_SEGMENT_HEIGHT;
+
+  // Pointer and grid helpers.
 
   // Перетворює координати миші всередині grid-body на слот розкладу.
   // Важливо: фонова сітка має 5-хв сегменти для точного показу allocation-ів,
@@ -869,12 +955,13 @@ function SchedulePage() {
     }
   }
 
+  // Backend loading and page refresh.
   async function loadPage(dateValue = startDate) {
     setIsLoading(true);
     setError(null);
 
     try {
-      const [bookingItems, schedule, catalog] = await Promise.all([
+      const [bookingItems, schedule, catalogPayload] = await Promise.all([
         adminRepository.listBookings(),
         adminRepository.getOperationsSchedule(
           getDayKey(dateValue),
@@ -882,8 +969,10 @@ function SchedulePage() {
         ),
         adminRepository.getCatalog(),
       ]);
-      const nextPosts = catalog.servicePosts;
 
+      const nextPosts = catalogPayload.servicePosts;
+
+      setCatalog(catalogPayload);
       setBookings(
         bookingItems.map(toScheduleBooking).filter(blocksScheduleSlot),
       );
@@ -902,6 +991,7 @@ function SchedulePage() {
     }
   }
 
+  // Effects that synchronize page state with external changes.
   useEffect(() => {
     const timerId = window.setTimeout(() => {
       void loadPage(startDate);
@@ -910,6 +1000,7 @@ function SchedulePage() {
     return () => window.clearTimeout(timerId);
   }, [startDate]);
 
+  // Toolbar and navigation event handlers.
   const handleDateChange: DatePickerProps["onChange"] = (date) => {
     if (dayjs.isDayjs(date)) {
       setStartDate(date.startOf("day"));
@@ -928,7 +1019,7 @@ function SchedulePage() {
     setSelectedPostIds(servicePosts.map((post) => post.id));
   };
 
-  const [multipleSelected, setMultipleSelected] = useState<string[]>([]);
+  // Render.
   return (
     <>
       <Space className="page-toolbar" wrap style={{ marginBottom: 16 }}>
@@ -1156,120 +1247,127 @@ function SchedulePage() {
         onCancel={() => setSelectedSlot(null)}
         onConfirm={() => setSelectedSlot(null)}
       >
-        <Space direction="vertical" size={6} style={{ width: "100%" }}>
-          {/* Дата послуга */}
-          <Card size="small" title="Створити запис на:">
-            <Space
-              direction="horizontal"
-              size={8}
-              style={{
-                width: "100%",
-                display: "flex",
-                justifyContent: "space-between",
-              }}
-            >
+        <Form form={createBookingForm} layout="vertical">
+          <Space direction="vertical" size={6} style={{ width: "100%" }}>
+            {/* Дата послуга */}
+            <Card size="small" title="Створити запис на:">
               <Space
                 direction="horizontal"
                 size={8}
-                style={{ display: "flex", width: "100%" }}
+                style={{
+                  width: "100%",
+                  display: "flex",
+                  justifyContent: "space-between",
+                }}
               >
-                <span>
-                  <ScheduleOutlined /> {selectedSlot?.day.format("DD.MM.YYYY")}{" "}
-                  |{" "}
-                </span>
-                <span>
-                  <ClockCircleOutlined /> {selectedSlot?.time}{" "}
-                </span>
-                {/* <span>Пост: {selectedSlot?.post?.title ?? "Не обрано"}</span> */}
-              </Space>
-
-              <Select
-                placeholder="Оберіть послугу"
-                style={{ minWidth: 260 }}
-                size="large"
-                value={undefined}
-                options={[
-                  { value: "wash", label: "Мийка" },
-                  {
-                    value: "suspension_adjistment_camber",
-                    label: "Розвал-сходження",
-                  },
-                  { value: "interior_cleanup", label: "Прибирання салону" },
-                  { value: "tanker_inside", label: "Внутрішня мийка цистерни" },
-                  { value: "disabled", label: "Disabled", disabled: true },
-                ]}
-              ></Select>
-            </Space>
-          </Card>
-          {/* Клієнт */}
-          <Card size="small" title="Дані клієнта:">
-            <Space direction="vertical" size={8} style={{ width: "100%" }}>
-              <Space
-                direction="horizontal"
-                size={8}
-                style={{ display: "flex", justifyContent: "space-between" }}
-              >
-                <span>Тел.:</span>{" "}
-                <Input
-                  style={{ minWidth: 260 }}
-                  size="large"
-                  type="tel"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  placeholder="+380 XX XXX XX XX"
-                />
-              </Space>
-              <Space
-                direction="horizontal"
-                size={8}
-                style={{ display: "flex", justifyContent: "space-between" }}
-              >
-                <span>Реєстраційний номер:</span>
-                <Input
-                  placeholder="AА1234ЯЯ"
-                  size="large"
-                  style={{ minWidth: 260 }}
-                />
-              </Space>
-              <Space
-                direction="horizontal"
-                size={8}
-                style={{ display: "flex", justifyContent: "space-between" }}
-              >
-                <span>Тип ТЗ:</span>
-                <Select
-                  placeholder="Оберіть тип ТЗ"
-                  style={{ minWidth: 260 }}
-                  size="large"
-                  options={[
-                    { value: "tanker_long", label: "Автоцистерна" },
-                    { value: "suv", label: "SUV" },
-                    { value: "truck", label: "Грузовик" },
-                  ]}
+                <Space
+                  direction="horizontal"
+                  size={8}
+                  style={{ display: "flex", width: "100%" }}
                 >
-                  {/* <Option value="sedan">Седан</Option>
-                <Option value="suv">SUV</Option>
-                <Option value="truck">Грузовик</Option> */}
-                </Select>
+                  <span>
+                    <ScheduleOutlined />{" "}
+                    {selectedSlot?.day.format("DD.MM.YYYY")} |{" "}
+                  </span>
+                  <span>
+                    <ClockCircleOutlined /> {selectedSlot?.time}{" "}
+                  </span>
+                  {/* <span>Пост: {selectedSlot?.post?.title ?? "Не обрано"}</span> */}
+                </Space>
+                <Form.Item name="serviceId" style={{ marginBottom: 0 }}>
+                  <Select
+                    placeholder="Оберіть послугу"
+                    style={{ minWidth: 260 }}
+                    size="large"
+                    value={undefined}
+                    options={serviceSelectOptions}
+                    onChange={() => {
+                      createBookingForm.setFieldsValue({
+                        vehicleTypeId: undefined,
+                        optionIds: [],
+                      });
+                    }}
+                  ></Select>
+                </Form.Item>
               </Space>
-            </Space>
-          </Card>
-          {/* Додаткові послуги */}
-
-          <Card size="small" title="Додаткові опції:">
-            <Space direction="vertical" size={8}>
-              <Space>
-                <Tag.CheckableTagGroup
-                  multiple
-                  options={["Option1", "Option2", "Option3", "Optuion4"]}
-                  value={multipleSelected}
-                  onChange={setMultipleSelected}
-                />
+            </Card>
+            {/* Клієнт */}
+            <Card size="small" title="Дані клієнта:">
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Space
+                  direction="horizontal"
+                  size={8}
+                  style={{ display: "flex", justifyContent: "space-between" }}
+                >
+                  <span>Тел.:</span>{" "}
+                  <Form.Item name="clientPhone" style={{ marginBottom: 0 }}>
+                    <Input
+                      style={{ minWidth: 260 }}
+                      size="large"
+                      type="tel"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      placeholder="+380 XX XXX XX XX"
+                    />
+                  </Form.Item>
+                </Space>
+                <Space
+                  direction="horizontal"
+                  size={8}
+                  style={{ display: "flex", justifyContent: "space-between" }}
+                >
+                  <span>Реєстраційний номер:</span>
+                  <Form.Item
+                    name="clientLicensePlate"
+                    style={{ marginBottom: 0 }}
+                  >
+                    <Input
+                      placeholder="AА1234ЯЯ"
+                      size="large"
+                      style={{ minWidth: 260, textTransform: "uppercase" }}
+                    />
+                  </Form.Item>
+                </Space>
+                <Space
+                  direction="horizontal"
+                  size={8}
+                  style={{ display: "flex", justifyContent: "space-between" }}
+                >
+                  <span>Тип ТЗ:</span>
+                  <Form.Item name="vehicleTypeId" style={{ marginBottom: 0 }}>
+                    <Select
+                      placeholder="Оберіть тип ТЗ"
+                      style={{ minWidth: 260 }}
+                      size="large"
+                      options={vehicleTypeSelectOptions}
+                      disabled={!selectedServiceId}
+                      onChange={() => {
+                        createBookingForm.setFieldsValue({
+                          optionIds: [],
+                        });
+                      }}
+                    ></Select>
+                  </Form.Item>
+                </Space>
               </Space>
-            </Space>
-          </Card>
-          <Card size="small" title="Підсумок :"></Card>
-        </Space>
+            </Card>
+            {/* Додаткові послуги */}
+            {/* {selectedVehicleTypeId && serviceOptionSelectOptions.length > 0 && ( */}
+            <Card size="small" title="Додаткові опції:">
+              <Form.Item name="optionIds" style={{ marginBottom: 0 }}>
+                <Select
+                  mode="multiple"
+                  placeholder="Оберіть додаткові опції"
+                  style={{ minWidth: 260 }}
+                  options={serviceOptionSelectOptions}
+                  disabled={!selectedOffering}
+                ></Select>
+              </Form.Item>
+            </Card>
+            {/* )} */}
+            <Card size="small" title="Підсумок :"></Card>
+          </Space>
+        </Form>
       </AppModal>
 
       <AppModal
