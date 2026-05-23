@@ -8,6 +8,7 @@ import type {
   ContractStats,
   BookingStats,
   OperationsSchedule,
+  PricingSummary,
   SendClientMessageResult,
 } from "./types";
 
@@ -39,6 +40,15 @@ type BookingsResponse = {
 
 type ClientsResponse = {
   clients: ClientListItem[];
+};
+
+type ResolvePricingInput = {
+  serviceId?: string;
+  serviceOfferingId?: string;
+  vehicleTypeId?: string;
+  vehicleNumber?: string;
+  billingMode?: "retail" | "contract" | "auto";
+  optionIds: string[];
 };
 
 async function listBookings() {
@@ -98,6 +108,15 @@ async function getOperationsSchedule(
   return request<OperationsSchedule>(`/operations/schedule/?${params}`);
 }
 
+async function resolvePricing(
+  input: ResolvePricingInput,
+): Promise<PricingSummary> {
+  return request<PricingSummary>("/pricing/resolve/", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export const adminRepository = {
   getCatalog() {
     return loadCatalog();
@@ -117,4 +136,5 @@ export const adminRepository = {
   getContractStats,
   getBookingStats,
   getOperationsSchedule,
+  resolvePricing,
 };

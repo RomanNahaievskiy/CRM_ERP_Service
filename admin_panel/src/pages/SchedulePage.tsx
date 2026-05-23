@@ -7,13 +7,17 @@ import {
 } from "react";
 import {
   CheckCircleOutlined,
+  CarOutlined,
+  IdcardOutlined,
   FileProtectOutlined,
   LeftOutlined,
+  LoadingOutlined,
   MoreOutlined,
   PlusOutlined,
+  PushpinOutlined,
+  PhoneOutlined,
   RightOutlined,
-  ClockCircleOutlined,
-  ScheduleOutlined,
+  ShoppingCartOutlined,
 } from "@ant-design/icons";
 import {
   Alert,
@@ -24,8 +28,11 @@ import {
   Grid,
   Select,
   Space,
+  Spin,
   Tag,
   Input,
+  notification,
+  Tooltip,
 } from "antd";
 import type { DatePickerProps } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
@@ -37,6 +44,7 @@ import type {
   OperationsSchedule,
   ServicePost,
   Catalog,
+  PricingSummary,
 } from "../api/types";
 import AppModal from "../components/AppModal";
 
@@ -48,6 +56,7 @@ const MIN_SEGMENT_STEP_MINUTES = 5;
 const GRID_SEGMENT_HEIGHT = 16;
 const GRID_TIME_COLUMN_WIDTH = 92;
 const GRID_POST_COLUMN_WIDTH = 156;
+const AUTO_POST_VALUE = "__auto__";
 
 type BookingStatus = "new" | "confirmed" | "canceled" | "done" | "no_show";
 type BookingClientType = "retail" | "contract" | "system";
@@ -87,8 +96,9 @@ type SelectedSlot = {
 type CreateBookingFormValues = {
   serviceId?: string;
   vehicleTypeId?: string;
-  phone?: string;
-  vehicleNumber?: string;
+  preferredPostId?: string;
+  clientPhone?: string;
+  clientLicensePlate?: string;
   optionIds?: string[];
 };
 
@@ -500,6 +510,47 @@ function getBookingPostsLabel(booking: ScheduleBooking) {
   return booking.postTitle || "-";
 }
 
+function getContractUnavailableText(reason: string) {
+  return reason === "vehicle_inactive"
+    ? "транспорт у договорі зараз неактивний"
+    : reason === "company_inactive"
+      ? "компанія за договором зараз неактивна"
+      : reason === "contract_not_started"
+        ? "договір ще не почав діяти"
+        : reason === "contract_expired"
+          ? "строк дії договору завершився"
+          : reason === "service_offering_not_found"
+            ? "для цього типу ТЗ не налаштовано вибрану послугу"
+            : "договір зараз неактивний";
+}
+
+function formatPrice(value: number | undefined) {
+  if (value === undefined) {
+    return "-";
+  }
+
+  return `${value.toLocaleString("uk-UA")} грн`;
+}
+
+function formatDuration(minutes: number | undefined) {
+  if (minutes === undefined) {
+    return "-";
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+
+  if (hours === 0) {
+    return `${restMinutes} хв`;
+  }
+
+  if (restMinutes === 0) {
+    return `${hours} год`;
+  }
+
+  return `${hours} год ${restMinutes} хв`;
+}
+
 function ScheduleMobileDayView({
   bookings,
   day,
@@ -684,6 +735,24 @@ function SchedulePage() {
   const screens = Grid.useBreakpoint();
   const isMobile = !screens.md;
   const [createBookingForm] = Form.useForm<CreateBookingFormValues>();
+  const [notificationApi, notificationContextHolder] =
+    notification.useNotification();
+  const formControlStyle = useMemo<CSSProperties>(
+    () => ({
+      minWidth: isMobile ? 0 : 260,
+      width: isMobile ? "220px" : "260px",
+    }),
+    [isMobile],
+  );
+  const formRowStyle = useMemo<CSSProperties>(
+    () => ({
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 8,
+      width: "100%",
+    }),
+    [],
+  );
 
   // Backend data and primary page state.
   const [startDate, setStartDate] = useState(dayjs().startOf("day"));
@@ -702,12 +771,19 @@ function SchedulePage() {
   >(null);
   const [selectedBooking, setSelectedBooking] =
     useState<ScheduleBooking | null>(null);
-  const [multipleSelected, setMultipleSelected] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pricingSummary, setPricingSummary] = useState<PricingSummary | null>(
+    null,
+  );
+  const [isPricingSummaryLoading, setIsPricingSummaryLoading] = useState(false);
+  const [pricingSummaryError, setPricingSummaryError] = useState<string | null>(
+    null,
+  );
 
   // Refs to DOM nodes used for pointer-to-grid calculations.
   const gridBodyRef = useRef<HTMLDivElement | null>(null);
+  const lastPricingLookupNoticeKey = useRef<string | null>(null);
 
   // Watched create-booking form values.
   const selectedServiceId = Form.useWatch("serviceId", createBookingForm);
@@ -715,16 +791,53 @@ function SchedulePage() {
     "vehicleTypeId",
     createBookingForm,
   );
+  const clientLicensePlate = Form.useWatch(
+    "clientLicensePlate",
+    createBookingForm,
+  );
+  const watchedOptionIds = Form.useWatch("optionIds", createBookingForm);
+  const selectedOptionIds = useMemo(
+    () => watchedOptionIds ?? [],
+    [watchedOptionIds],
+  );
 
   // Derived create-booking form data.
-  const serviceSelectOptions = useMemo(
-    () =>
-      catalog?.services.map((service) => ({
+  const selectedSlotSupportedServiceIds = useMemo(
+    () => selectedSlot?.post?.supportedServiceIds ?? [],
+    [selectedSlot],
+  );
+
+  const selectedSlotDefaultServiceId = useMemo(() => {
+    if (!catalog || selectedSlotSupportedServiceIds.length !== 1) {
+      return undefined;
+    }
+
+    const [serviceId] = selectedSlotSupportedServiceIds;
+    return catalog.services.some((service) => service.id === serviceId)
+      ? serviceId
+      : undefined;
+  }, [catalog, selectedSlotSupportedServiceIds]);
+
+  const serviceSelectOptions = useMemo(() => {
+    const services = catalog?.services ?? [];
+    const supportedServiceIds = new Set(selectedSlotSupportedServiceIds);
+
+    return [...services]
+      .sort((left, right) => {
+        const leftIsSupported = supportedServiceIds.has(left.id);
+        const rightIsSupported = supportedServiceIds.has(right.id);
+
+        if (leftIsSupported === rightIsSupported) {
+          return 0;
+        }
+
+        return leftIsSupported ? -1 : 1;
+      })
+      .map((service) => ({
         value: service.id,
         label: service.title,
-      })) ?? [],
-    [catalog],
-  );
+      }));
+  }, [catalog, selectedSlotSupportedServiceIds]);
 
   const vehicleTypeSelectOptions = useMemo(() => {
     if (!catalog || !selectedServiceId) {
@@ -771,6 +884,23 @@ function SchedulePage() {
         label: option.title,
       }));
   }, [catalog, selectedOffering]);
+
+  const postSelectOptions = useMemo(
+    () => [
+      {
+        value: AUTO_POST_VALUE,
+        label: "Авто",
+      },
+      ...servicePosts.map((post) => ({
+        value: post.id,
+        label: post.title,
+        disabled: selectedServiceId
+          ? !post.supportedServiceIds.includes(selectedServiceId)
+          : false,
+      })),
+    ],
+    [selectedServiceId, servicePosts],
+  );
 
   // Derived schedule data calculated from backend state and current filters.
   const scheduleDays = useMemo(() => getScheduleDays(startDate), [startDate]);
@@ -1000,6 +1130,185 @@ function SchedulePage() {
     return () => window.clearTimeout(timerId);
   }, [startDate]);
 
+  useEffect(() => {
+    if (!selectedSlot) {
+      createBookingForm.resetFields();
+      return;
+    }
+
+    createBookingForm.setFieldsValue({
+      serviceId: selectedSlotDefaultServiceId,
+      vehicleTypeId: undefined,
+      optionIds: [],
+      preferredPostId: selectedSlot.post?.id ?? AUTO_POST_VALUE,
+      clientLicensePlate: undefined,
+    });
+    lastPricingLookupNoticeKey.current = null;
+    setPricingSummary(null);
+    setPricingSummaryError(null);
+    setIsPricingSummaryLoading(false);
+  }, [createBookingForm, selectedSlot, selectedSlotDefaultServiceId]);
+
+  useEffect(() => {
+    if (!selectedSlot || !selectedServiceId) {
+      return;
+    }
+
+    const preferredPostId = createBookingForm.getFieldValue("preferredPostId");
+    if (!preferredPostId || preferredPostId === AUTO_POST_VALUE) {
+      return;
+    }
+
+    const preferredPost = servicePosts.find(
+      (post) => post.id === preferredPostId,
+    );
+    if (
+      preferredPost &&
+      !preferredPost.supportedServiceIds.includes(selectedServiceId)
+    ) {
+      createBookingForm.setFieldsValue({
+        preferredPostId: AUTO_POST_VALUE,
+      });
+    }
+  }, [createBookingForm, selectedServiceId, selectedSlot, servicePosts]);
+
+  useEffect(() => {
+    if (!selectedSlot || !selectedServiceId) {
+      lastPricingLookupNoticeKey.current = null;
+      setPricingSummary(null);
+      setPricingSummaryError(null);
+      setIsPricingSummaryLoading(false);
+      return;
+    }
+
+    const vehicleNumber = clientLicensePlate?.trim().toUpperCase() ?? "";
+    const hasVehicleNumberForLookup = vehicleNumber.length >= 3;
+    const canResolvePricing =
+      Boolean(selectedVehicleTypeId) || hasVehicleNumberForLookup;
+    if (!canResolvePricing) {
+      lastPricingLookupNoticeKey.current = null;
+      setPricingSummary(null);
+      setPricingSummaryError(null);
+      setIsPricingSummaryLoading(false);
+      return;
+    }
+
+    let isStale = false;
+    setIsPricingSummaryLoading(true);
+    setPricingSummaryError(null);
+
+    const timerId = window.setTimeout(() => {
+      adminRepository
+        .resolvePricing({
+          serviceId: selectedServiceId,
+          vehicleTypeId: selectedVehicleTypeId,
+          vehicleNumber: hasVehicleNumberForLookup ? vehicleNumber : undefined,
+          billingMode: "auto",
+          optionIds: selectedOptionIds,
+        })
+        .then((summary) => {
+          if (isStale) {
+            return;
+          }
+
+          setPricingSummary(summary);
+          const contractVehicle = summary.vehicle;
+          if (contractVehicle) {
+            const currentVehicleNumber =
+              createBookingForm.getFieldValue("clientLicensePlate");
+            if (
+              contractVehicle.vehicleNumber &&
+              currentVehicleNumber !== contractVehicle.vehicleNumber
+            ) {
+              createBookingForm.setFieldsValue({
+                clientLicensePlate: contractVehicle.vehicleNumber,
+              });
+            }
+
+            if (
+              contractVehicle.vehicleTypeId &&
+              createBookingForm.getFieldValue("vehicleTypeId") !==
+                contractVehicle.vehicleTypeId
+            ) {
+              createBookingForm.setFieldsValue({
+                vehicleTypeId: contractVehicle.vehicleTypeId,
+                optionIds: [],
+              });
+            }
+          }
+
+          const noticeKey = [
+            selectedServiceId,
+            summary.contractFound ? "contract" : "retail",
+            summary.contractUnavailableReason ?? "ok",
+            summary.vehicle?.vehicleNumber ?? vehicleNumber,
+          ].join("__");
+          if (lastPricingLookupNoticeKey.current !== noticeKey) {
+            lastPricingLookupNoticeKey.current = noticeKey;
+
+            if (summary.contractFound && summary.contract) {
+              notificationApi.success({
+                message: `Контракт: ${summary.contract.companyTitle} / ${summary.contract.number}`,
+                description: summary.vehicle?.vehicleTypeTitle
+                  ? `Тип ТЗ визначено автоматично: ${summary.vehicle.vehicleTypeTitle}`
+                  : undefined,
+                placement: "topRight",
+              });
+            } else if (
+              summary.contractMatched &&
+              summary.contractUnavailableReason
+            ) {
+              notificationApi.warning({
+                message: "Номер знайдено в контрактних даних",
+                description: `Але ${getContractUnavailableText(
+                  summary.contractUnavailableReason,
+                )}. Тип ТЗ підставлено, запис продовжуємо як retail.`,
+                placement: "topRight",
+              });
+            }
+          }
+        })
+        .catch((lookupError) => {
+          if (isStale) {
+            return;
+          }
+
+          setPricingSummary(null);
+          setPricingSummaryError(
+            lookupError instanceof Error
+              ? lookupError.message
+              : String(lookupError),
+          );
+          notificationApi.warning({
+            message: "Не вдалося перевірити номер у контрактах",
+            description:
+              lookupError instanceof Error
+                ? lookupError.message
+                : String(lookupError),
+            placement: "topRight",
+          });
+        })
+        .finally(() => {
+          if (!isStale) {
+            setIsPricingSummaryLoading(false);
+          }
+        });
+    }, 500);
+
+    return () => {
+      isStale = true;
+      window.clearTimeout(timerId);
+    };
+  }, [
+    clientLicensePlate,
+    createBookingForm,
+    notificationApi,
+    selectedOptionIds,
+    selectedServiceId,
+    selectedSlot,
+    selectedVehicleTypeId,
+  ]);
+
   // Toolbar and navigation event handlers.
   const handleDateChange: DatePickerProps["onChange"] = (date) => {
     if (dayjs.isDayjs(date)) {
@@ -1022,6 +1331,7 @@ function SchedulePage() {
   // Render.
   return (
     <>
+      {notificationContextHolder}
       <Space className="page-toolbar" wrap style={{ marginBottom: 16 }}>
         <Button loading={isLoading} onClick={() => void loadPage()}>
           Оновити бронювання
@@ -1243,67 +1553,86 @@ function SchedulePage() {
       <AppModal
         isOpen={Boolean(selectedSlot)}
         okText="Створити запис"
-        title=""
+        title="Створити бронювання"
         onCancel={() => setSelectedSlot(null)}
         onConfirm={() => setSelectedSlot(null)}
       >
         <Form form={createBookingForm} layout="vertical">
-          <Space direction="vertical" size={6} style={{ width: "100%" }}>
+          <Space orientation="vertical" size={6} style={{ width: "100%" }}>
             {/* Дата послуга */}
-            <Card size="small" title="Створити запис на:">
+            <Card
+              size="small"
+              title={`Запис на ${selectedSlot?.day.format("DD.MM.YYYY")} ${selectedSlot?.time} `}
+            >
               <Space
-                direction="horizontal"
-                size={8}
-                style={{
-                  width: "100%",
-                  display: "flex",
-                  justifyContent: "space-between",
-                }}
+                orientation="vertical"
+                style={{ width: "100%" }}
+                size={isMobile ? 4 : 8}
               >
-                <Space
-                  direction="horizontal"
-                  size={8}
-                  style={{ display: "flex", width: "100%" }}
-                >
-                  <span>
-                    <ScheduleOutlined />{" "}
-                    {selectedSlot?.day.format("DD.MM.YYYY")} |{" "}
-                  </span>
-                  <span>
-                    <ClockCircleOutlined /> {selectedSlot?.time}{" "}
-                  </span>
+                <Space orientation="horizontal" size={8} style={formRowStyle}>
+                  {isMobile ? (
+                    <Tooltip title="Послуга">
+                      <ShoppingCartOutlined aria-label="Послуга" />
+                    </Tooltip>
+                  ) : (
+                    <span>Послуга:</span>
+                  )}
                   {/* <span>Пост: {selectedSlot?.post?.title ?? "Не обрано"}</span> */}
+                  <Form.Item name="serviceId" style={{ marginBottom: 0 }}>
+                    <Select
+                      placeholder="Оберіть послугу"
+                      style={formControlStyle}
+                      size={isMobile ? "medium" : "large"}
+                      value={undefined}
+                      options={serviceSelectOptions}
+                      onChange={() => {
+                        createBookingForm.setFieldsValue({
+                          vehicleTypeId: undefined,
+                          optionIds: [],
+                        });
+                      }}
+                    ></Select>
+                  </Form.Item>
                 </Space>
-                <Form.Item name="serviceId" style={{ marginBottom: 0 }}>
-                  <Select
-                    placeholder="Оберіть послугу"
-                    style={{ minWidth: 260 }}
-                    size="large"
-                    value={undefined}
-                    options={serviceSelectOptions}
-                    onChange={() => {
-                      createBookingForm.setFieldsValue({
-                        vehicleTypeId: undefined,
-                        optionIds: [],
-                      });
-                    }}
-                  ></Select>
-                </Form.Item>
+                <Space orientation="horizontal" style={formRowStyle} size={8}>
+                  {isMobile ? (
+                    <Tooltip title="Основний пост">
+                      <PushpinOutlined aria-label="Основний пост" />
+                    </Tooltip>
+                  ) : (
+                    <span>Основний пост:</span>
+                  )}
+                  <Form.Item name="preferredPostId" style={{ marginBottom: 0 }}>
+                    <Select
+                      placeholder="Оберіть пост"
+                      style={formControlStyle}
+                      size={isMobile ? "medium" : "large"}
+                      options={postSelectOptions}
+                      disabled={!selectedServiceId}
+                    ></Select>
+                  </Form.Item>
+                </Space>
               </Space>
             </Card>
             {/* Клієнт */}
             <Card size="small" title="Дані клієнта:">
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                <Space
-                  direction="horizontal"
-                  size={8}
-                  style={{ display: "flex", justifyContent: "space-between" }}
-                >
-                  <span>Тел.:</span>{" "}
+              <Space
+                orientation="vertical"
+                size={isMobile ? 4 : 8}
+                style={{ width: "100%" }}
+              >
+                <Space orientation="horizontal" size={8} style={formRowStyle}>
+                  {isMobile ? (
+                    <Tooltip title="Телефон">
+                      <PhoneOutlined aria-label="Телефон" />
+                    </Tooltip>
+                  ) : (
+                    <span>Тел.:</span>
+                  )}
                   <Form.Item name="clientPhone" style={{ marginBottom: 0 }}>
                     <Input
-                      style={{ minWidth: 260 }}
-                      size="large"
+                      style={formControlStyle}
+                      size={isMobile ? "medium" : "large"}
                       type="tel"
                       inputMode="numeric"
                       autoComplete="off"
@@ -1311,34 +1640,41 @@ function SchedulePage() {
                     />
                   </Form.Item>
                 </Space>
-                <Space
-                  direction="horizontal"
-                  size={8}
-                  style={{ display: "flex", justifyContent: "space-between" }}
-                >
-                  <span>Реєстраційний номер:</span>
+                <Space orientation="horizontal" size={8} style={formRowStyle}>
+                  {isMobile ? (
+                    <Tooltip title="Реєстраційний номер">
+                      <IdcardOutlined aria-label="Реєстраційний номер" />
+                    </Tooltip>
+                  ) : (
+                    <span>Реєстраційний номер:</span>
+                  )}
                   <Form.Item
                     name="clientLicensePlate"
                     style={{ marginBottom: 0 }}
                   >
                     <Input
                       placeholder="AА1234ЯЯ"
-                      size="large"
-                      style={{ minWidth: 260, textTransform: "uppercase" }}
+                      size={isMobile ? "medium" : "large"}
+                      style={{
+                        ...formControlStyle,
+                        textTransform: "uppercase",
+                      }}
                     />
                   </Form.Item>
                 </Space>
-                <Space
-                  direction="horizontal"
-                  size={8}
-                  style={{ display: "flex", justifyContent: "space-between" }}
-                >
-                  <span>Тип ТЗ:</span>
+                <Space orientation="horizontal" size={8} style={formRowStyle}>
+                  {isMobile ? (
+                    <Tooltip title="Тип ТЗ">
+                      <CarOutlined aria-label="Тип ТЗ" />
+                    </Tooltip>
+                  ) : (
+                    <span>Тип ТЗ:</span>
+                  )}
                   <Form.Item name="vehicleTypeId" style={{ marginBottom: 0 }}>
                     <Select
                       placeholder="Оберіть тип ТЗ"
-                      style={{ minWidth: 260 }}
-                      size="large"
+                      style={formControlStyle}
+                      size={isMobile ? "medium" : "large"}
                       options={vehicleTypeSelectOptions}
                       disabled={!selectedServiceId}
                       onChange={() => {
@@ -1357,15 +1693,80 @@ function SchedulePage() {
               <Form.Item name="optionIds" style={{ marginBottom: 0 }}>
                 <Select
                   mode="multiple"
+                  size={isMobile ? "medium" : "large"}
                   placeholder="Оберіть додаткові опції"
-                  style={{ minWidth: 260 }}
+                  // style={formControlStyle}
                   options={serviceOptionSelectOptions}
                   disabled={!selectedOffering}
                 ></Select>
               </Form.Item>
             </Card>
             {/* )} */}
-            <Card size="small" title="Підсумок :"></Card>
+            <Card size="small" title="Підсумок:">
+              <Space
+                orientation="vertical"
+                size={isMobile ? 4 : 8}
+                style={{ width: "100%" }}
+              >
+                <Space
+                  orientation="horizontal"
+                  size={8}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <Space size={4}>
+                    <span>Режим:</span>
+                    <Tag
+                      color={
+                        pricingSummary?.billingMode === "contract"
+                          ? "green"
+                          : "default"
+                      }
+                    >
+                      {pricingSummary?.billingMode === "contract"
+                        ? "Контракт"
+                        : "Retail"}
+                    </Tag>
+                  </Space>
+
+                  <Space size={4}>
+                    <span>Час:</span>
+                    <strong>
+                      {isPricingSummaryLoading ? (
+                        <Spin
+                          indicator={<LoadingOutlined spin />}
+                          size="small"
+                        />
+                      ) : (
+                        formatDuration(pricingSummary?.totalDurationMinutes)
+                      )}
+                    </strong>
+                  </Space>
+
+                  <Space size={4}>
+                    <span>Вартість:</span>
+                    <strong>
+                      {isPricingSummaryLoading ? (
+                        <Spin
+                          indicator={<LoadingOutlined spin />}
+                          size="small"
+                        />
+                      ) : (
+                        formatPrice(pricingSummary?.totalPrice)
+                      )}
+                    </strong>
+                  </Space>
+                </Space>
+
+                {pricingSummaryError && (
+                  <span style={{ color: "var(--app-danger, #b91c1c)" }}>
+                    {pricingSummaryError}
+                  </span>
+                )}
+              </Space>
+            </Card>
           </Space>
         </Form>
       </AppModal>

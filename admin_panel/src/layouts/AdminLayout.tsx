@@ -104,7 +104,7 @@ function AdminLayout() {
       <Drawer
         title="KLR Service"
         placement="left"
-        width={288}
+        size={288}
         open={isMenuOpen}
         onClose={() => setIsMenuOpen(false)}
         styles={{ body: { padding: 0 } }}

@@ -187,3 +187,43 @@ export type OperationsSchedule = {
   slotStepMinutes: number;
   days: OperationsScheduleDay[];
 };
+
+export type PricingSummary = {
+  billingMode: "retail" | "contract";
+  contractFound: boolean;
+  contractMatched?: boolean;
+  contractUnavailableReason?:
+    | "vehicle_inactive"
+    | "company_inactive"
+    | "contract_not_active"
+    | "contract_not_started"
+    | "contract_expired"
+    | "service_offering_not_found"
+    | null;
+  contract?: {
+    id: number;
+    number: string;
+    companyTitle: string;
+  } | null;
+  vehicle?: {
+    vehicleNumber: string;
+    vehicleTypeId: string;
+    vehicleGroupId: string;
+    vehicleTypeTitle: string;
+    title?: string;
+  } | null;
+  offeringId?: string | null;
+  serviceId?: string | null;
+  vehicleTypeId?: string | null;
+  vehicleGroupId?: string | null;
+  servicePrice?: number;
+  serviceDurationMinutes?: number;
+  optionItems?: {
+    id: string;
+    title: string;
+    price: number;
+    extraDurationMinutes: number;
+  }[];
+  totalPrice: number;
+  totalDurationMinutes: number;
+};
